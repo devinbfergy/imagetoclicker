@@ -13,7 +13,9 @@ import {
 } from '@/components';
 import {
   loadOpenCV,
+  preloadOpenCV,
   isOpenCVReady,
+  isOpenCVLoading,
   loadImage,
   imageToCanvas,
   extractContour,
@@ -41,25 +43,39 @@ const initialState: AppState = {
 export default function Home() {
   const [state, setState] = useState<AppState>(initialState);
   const [plates, setPlates] = useState<GeneratedPlates | null>(null);
-  const [cvLoading, setCvLoading] = useState(true);
+  const [cvReady, setCvReady] = useState(false);
+  const [usingFallback, setUsingFallback] = useState(false);
 
   const updateState = useCallback((updates: Partial<AppState>) => {
     setState((prev) => ({ ...prev, ...updates }));
   }, []);
 
-  // Load OpenCV on mount
+  // Start preloading OpenCV in background on mount
   useEffect(() => {
-    loadOpenCV()
-      .then(() => setCvLoading(false))
-      .catch((err) => {
-        setCvLoading(false);
-        updateState({ error: err.message });
-      });
-  }, [updateState]);
+    preloadOpenCV();
+
+    // Check periodically if OpenCV is ready
+    const checkInterval = setInterval(() => {
+      if (isOpenCVReady()) {
+        setCvReady(true);
+        clearInterval(checkInterval);
+      }
+    }, 500);
+
+    return () => clearInterval(checkInterval);
+  }, []);
+
+  // Reprocess with OpenCV when it becomes ready (if we used fallback before)
+  useEffect(() => {
+    if (cvReady && usingFallback && state.imageFile) {
+      // OpenCV just loaded - reprocess for better quality
+      processImage();
+    }
+  }, [cvReady]);
 
   // Process image when relevant state changes
   const processImage = useCallback(async () => {
-    if (!state.imageFile || !isOpenCVReady()) return;
+    if (!state.imageFile) return;
 
     updateState({ isProcessing: true, error: null });
 
@@ -67,23 +83,30 @@ export default function Home() {
       const img = await loadImage(state.imageFile);
       const canvas = imageToCanvas(img);
 
-      let contour = extractContour(canvas, state.processingMode, state.threshold);
+      const { polygon: contour, usedFallback } = extractContour(
+        canvas,
+        state.processingMode,
+        state.threshold
+      );
+
       if (!contour || contour.length < 3) {
         throw new Error('Could not extract shape from image. Try adjusting the threshold.');
       }
 
+      setUsingFallback(usedFallback);
+
       // Simplify the contour
-      contour = simplifyPolygon(contour, state.simplificationTolerance / 100);
+      let simplified = simplifyPolygon(contour, state.simplificationTolerance / 100);
 
       // Center at origin
-      contour = centerPolygon(contour);
+      simplified = centerPolygon(simplified);
 
       // Convert pixels to mm (assume ~10 pixels per mm as base, user can scale)
-      const bbox = getBoundingBox(contour);
+      const bbox = getBoundingBox(simplified);
       const pixelsPerMm = Math.max(bbox.width, bbox.height) / 50; // Default to ~50mm max dimension
-      contour = contour.map((p) => ({ x: p.x / pixelsPerMm, y: p.y / pixelsPerMm }));
+      simplified = simplified.map((p) => ({ x: p.x / pixelsPerMm, y: p.y / pixelsPerMm }));
 
-      updateState({ polygon: contour, isProcessing: false });
+      updateState({ polygon: simplified, isProcessing: false });
     } catch (err) {
       updateState({
         isProcessing: false,
@@ -94,7 +117,7 @@ export default function Home() {
 
   // Reprocess when settings change
   useEffect(() => {
-    if (state.imageFile && isOpenCVReady()) {
+    if (state.imageFile) {
       processImage();
     }
   }, [state.imageFile, state.processingMode, state.threshold, state.simplificationTolerance, processImage]);
@@ -165,9 +188,9 @@ export default function Home() {
             </Alert>
           )}
 
-          {cvLoading && (
-            <Alert severity="info" sx={{ mt: 2 }} icon={<CircularProgress size={20} />}>
-              Loading image processing library...
+          {usingFallback && state.polygon && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              Using quick processing mode. Higher quality processing is loading in the background...
             </Alert>
           )}
 
@@ -187,7 +210,7 @@ export default function Home() {
                   <ImageUploader
                     imageDataUrl={state.imageDataUrl}
                     onImageSelect={handleImageSelect}
-                    disabled={cvLoading || state.isProcessing}
+                    disabled={state.isProcessing}
                   />
                 </Box>
 
@@ -203,7 +226,7 @@ export default function Home() {
                     onModeChange={(mode) => updateState({ processingMode: mode })}
                     onThresholdChange={(value) => updateState({ threshold: value })}
                     onSimplificationChange={(value) => updateState({ simplificationTolerance: value })}
-                    disabled={cvLoading || state.isProcessing}
+                    disabled={state.isProcessing}
                   />
                 </Box>
 

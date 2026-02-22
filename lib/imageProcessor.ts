@@ -1,30 +1,105 @@
 import { Point, Polygon, ProcessingMode } from './types';
+import {
+  extractContourLightweight,
+  simplifyPolygonLightweight,
+  getBoundingBoxLightweight,
+  centerPolygonLightweight,
+} from './lightweightContour';
 
-// OpenCV will be loaded dynamically
-let cv: typeof import('@techstark/opencv-js') | null = null;
+// OpenCV state
+let cv: any = null;
 let cvReady = false;
+let cvLoading = false;
+let cvLoadPromise: Promise<void> | null = null;
 
-/**
- * Load OpenCV.js dynamically
- */
-export async function loadOpenCV(): Promise<void> {
-  if (cvReady && cv) return;
-
-  try {
-    const opencv = await import('@techstark/opencv-js');
-    cv = opencv;
-    cvReady = true;
-  } catch (error) {
-    console.error('Failed to load OpenCV:', error);
-    throw new Error('Failed to load OpenCV. Please refresh the page.');
-  }
-}
+// CDN URL for OpenCV.js (much faster than bundled)
+const OPENCV_CDN_URL = 'https://docs.opencv.org/4.9.0/opencv.js';
 
 /**
  * Check if OpenCV is ready
  */
 export function isOpenCVReady(): boolean {
   return cvReady && cv !== null;
+}
+
+/**
+ * Check if OpenCV is currently loading
+ */
+export function isOpenCVLoading(): boolean {
+  return cvLoading;
+}
+
+/**
+ * Load OpenCV.js from CDN (lazy, non-blocking)
+ * Returns a promise that resolves when OpenCV is ready
+ */
+export function loadOpenCV(): Promise<void> {
+  if (cvReady && cv) return Promise.resolve();
+  if (cvLoadPromise) return cvLoadPromise;
+
+  cvLoading = true;
+
+  cvLoadPromise = new Promise((resolve, reject) => {
+    // Check if already loaded (from previous page load)
+    if (typeof window !== 'undefined' && (window as any).cv && (window as any).cv.Mat) {
+      cv = (window as any).cv;
+      cvReady = true;
+      cvLoading = false;
+      resolve();
+      return;
+    }
+
+    // Create script element
+    const script = document.createElement('script');
+    script.src = OPENCV_CDN_URL;
+    script.async = true;
+
+    script.onload = () => {
+      // OpenCV.js sets up cv on window, but needs to initialize
+      const checkReady = () => {
+        if ((window as any).cv && (window as any).cv.Mat) {
+          cv = (window as any).cv;
+          cvReady = true;
+          cvLoading = false;
+          resolve();
+        } else if ((window as any).cv && (window as any).cv.onRuntimeInitialized !== undefined) {
+          // Wait for WASM to initialize
+          (window as any).cv.onRuntimeInitialized = () => {
+            cv = (window as any).cv;
+            cvReady = true;
+            cvLoading = false;
+            resolve();
+          };
+        } else {
+          // Keep checking
+          setTimeout(checkReady, 100);
+        }
+      };
+      checkReady();
+    };
+
+    script.onerror = () => {
+      cvLoading = false;
+      reject(new Error('Failed to load OpenCV from CDN'));
+    };
+
+    document.head.appendChild(script);
+  });
+
+  return cvLoadPromise;
+}
+
+/**
+ * Start loading OpenCV in background (fire and forget)
+ */
+export function preloadOpenCV(): void {
+  if (typeof window === 'undefined') return;
+  if (cvReady || cvLoading) return;
+  
+  // Start loading but don't wait
+  loadOpenCV().catch((err) => {
+    console.warn('OpenCV preload failed:', err.message);
+  });
 }
 
 /**
@@ -77,14 +152,26 @@ export function imageToCanvas(
 }
 
 /**
- * Extract contour from image using threshold-based detection
+ * Extract contour using OpenCV (high quality)
  */
-function extractContourThreshold(
+function extractContourOpenCV(
+  canvas: HTMLCanvasElement,
+  mode: ProcessingMode,
+  threshold: number
+): Polygon | null {
+  if (!cv) return null;
+
+  if (mode === 'alpha') {
+    return extractContourAlphaOpenCV(canvas);
+  } else {
+    return extractContourThresholdOpenCV(canvas, threshold);
+  }
+}
+
+function extractContourThresholdOpenCV(
   canvas: HTMLCanvasElement,
   threshold: number
 ): Polygon | null {
-  if (!cv) throw new Error('OpenCV not loaded');
-
   const src = cv.imread(canvas);
   const gray = new cv.Mat();
   const binary = new cv.Mat();
@@ -92,20 +179,12 @@ function extractContourThreshold(
   const hierarchy = new cv.Mat();
 
   try {
-    // Convert to grayscale
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-    // Apply threshold
     cv.threshold(gray, binary, threshold, 255, cv.THRESH_BINARY);
-
-    // Find contours
     cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    if (contours.size() === 0) {
-      return null;
-    }
+    if (contours.size() === 0) return null;
 
-    // Find the largest contour
     let largestIdx = 0;
     let largestArea = 0;
 
@@ -117,8 +196,7 @@ function extractContourThreshold(
       }
     }
 
-    const largestContour = contours.get(largestIdx);
-    return matToPolygon(largestContour);
+    return matToPolygon(contours.get(largestIdx));
   } finally {
     src.delete();
     gray.delete();
@@ -128,27 +206,21 @@ function extractContourThreshold(
   }
 }
 
-/**
- * Extract contour from image using alpha channel
- */
-function extractContourAlpha(canvas: HTMLCanvasElement): Polygon | null {
-  if (!cv) throw new Error('OpenCV not loaded');
-
+function extractContourAlphaOpenCV(canvas: HTMLCanvasElement): Polygon | null {
   const ctx = canvas.getContext('2d')!;
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = imageData.data;
 
-  // Create a binary mask from alpha channel
+  // Create binary mask from alpha
   const maskCanvas = document.createElement('canvas');
   maskCanvas.width = canvas.width;
   maskCanvas.height = canvas.height;
   const maskCtx = maskCanvas.getContext('2d')!;
   const maskData = maskCtx.createImageData(canvas.width, canvas.height);
 
-  // Set pixels to white where alpha > 0, black otherwise
   for (let i = 0; i < data.length; i += 4) {
     const alpha = data[i + 3];
-    const value = alpha > 10 ? 255 : 0; // Small threshold to handle anti-aliasing
+    const value = alpha > 10 ? 255 : 0;
     maskData.data[i] = value;
     maskData.data[i + 1] = value;
     maskData.data[i + 2] = value;
@@ -157,7 +229,6 @@ function extractContourAlpha(canvas: HTMLCanvasElement): Polygon | null {
 
   maskCtx.putImageData(maskData, 0, 0);
 
-  // Now process the mask
   const src = cv.imread(maskCanvas);
   const gray = new cv.Mat();
   const contours = new cv.MatVector();
@@ -167,11 +238,8 @@ function extractContourAlpha(canvas: HTMLCanvasElement): Polygon | null {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.findContours(gray, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    if (contours.size() === 0) {
-      return null;
-    }
+    if (contours.size() === 0) return null;
 
-    // Find the largest contour
     let largestIdx = 0;
     let largestArea = 0;
 
@@ -183,8 +251,7 @@ function extractContourAlpha(canvas: HTMLCanvasElement): Polygon | null {
       }
     }
 
-    const largestContour = contours.get(largestIdx);
-    return matToPolygon(largestContour);
+    return matToPolygon(contours.get(largestIdx));
   } finally {
     src.delete();
     gray.delete();
@@ -193,10 +260,7 @@ function extractContourAlpha(canvas: HTMLCanvasElement): Polygon | null {
   }
 }
 
-/**
- * Convert OpenCV Mat contour to our Polygon type
- */
-function matToPolygon(mat: import('@techstark/opencv-js').Mat): Polygon {
+function matToPolygon(mat: any): Polygon {
   const points: Point[] = [];
   const data = mat.data32S;
 
@@ -208,14 +272,11 @@ function matToPolygon(mat: import('@techstark/opencv-js').Mat): Polygon {
 }
 
 /**
- * Simplify a polygon using Ramer-Douglas-Peucker algorithm
- * OpenCV's approxPolyDP does this for us
+ * Simplify polygon using OpenCV (high quality)
  */
-export function simplifyPolygon(polygon: Polygon, tolerance: number): Polygon {
-  if (!cv) throw new Error('OpenCV not loaded');
-  if (polygon.length < 3) return polygon;
+function simplifyPolygonOpenCV(polygon: Polygon, tolerance: number): Polygon {
+  if (!cv || polygon.length < 3) return polygon;
 
-  // Convert polygon to Mat
   const contour = new cv.Mat(polygon.length, 1, cv.CV_32SC2);
   const data = contour.data32S;
 
@@ -237,24 +298,37 @@ export function simplifyPolygon(polygon: Polygon, tolerance: number): Polygon {
 }
 
 /**
- * Main function to extract contour from an image
+ * Extract contour - uses OpenCV if available, otherwise lightweight fallback
+ * Returns { polygon, usedFallback } to indicate which method was used
  */
 export function extractContour(
   canvas: HTMLCanvasElement,
   mode: ProcessingMode,
   threshold: number = 128
-): Polygon | null {
-  if (!cv) throw new Error('OpenCV not loaded');
-
-  if (mode === 'alpha') {
-    return extractContourAlpha(canvas);
-  } else {
-    return extractContourThreshold(canvas, threshold);
+): { polygon: Polygon | null; usedFallback: boolean } {
+  // Try OpenCV first if available
+  if (isOpenCVReady()) {
+    const polygon = extractContourOpenCV(canvas, mode, threshold);
+    return { polygon, usedFallback: false };
   }
+
+  // Fall back to lightweight extraction
+  const polygon = extractContourLightweight(canvas, mode, threshold);
+  return { polygon, usedFallback: true };
 }
 
 /**
- * Get the bounding box of a polygon
+ * Simplify polygon - uses OpenCV if available, otherwise lightweight fallback
+ */
+export function simplifyPolygon(polygon: Polygon, tolerance: number): Polygon {
+  if (isOpenCVReady()) {
+    return simplifyPolygonOpenCV(polygon, tolerance);
+  }
+  return simplifyPolygonLightweight(polygon, tolerance);
+}
+
+/**
+ * Get bounding box - pure JS, no OpenCV needed
  */
 export function getBoundingBox(polygon: Polygon): {
   minX: number;
@@ -264,49 +338,18 @@ export function getBoundingBox(polygon: Polygon): {
   width: number;
   height: number;
 } {
-  if (polygon.length === 0) {
-    return { minX: 0, minY: 0, maxX: 0, maxY: 0, width: 0, height: 0 };
-  }
-
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-
-  for (const p of polygon) {
-    minX = Math.min(minX, p.x);
-    minY = Math.min(minY, p.y);
-    maxX = Math.max(maxX, p.x);
-    maxY = Math.max(maxY, p.y);
-  }
-
-  return {
-    minX,
-    minY,
-    maxX,
-    maxY,
-    width: maxX - minX,
-    height: maxY - minY,
-  };
+  return getBoundingBoxLightweight(polygon);
 }
 
 /**
- * Center a polygon at origin (0, 0)
+ * Center polygon at origin - pure JS, no OpenCV needed
  */
 export function centerPolygon(polygon: Polygon): Polygon {
-  const bbox = getBoundingBox(polygon);
-  const centerX = bbox.minX + bbox.width / 2;
-  const centerY = bbox.minY + bbox.height / 2;
-
-  return polygon.map((p) => ({
-    x: p.x - centerX,
-    y: p.y - centerY,
-  }));
+  return centerPolygonLightweight(polygon);
 }
 
 /**
  * Scale a polygon to fit within a target size while maintaining aspect ratio
- * Also ensures minimum size for switch fitting
  */
 export function scalePolygon(
   polygon: Polygon,
@@ -316,17 +359,15 @@ export function scalePolygon(
   minHeight: number
 ): Polygon {
   const bbox = getBoundingBox(polygon);
-  
+
   if (bbox.width === 0 || bbox.height === 0) {
     return polygon;
   }
 
-  // Calculate scale to fit target size
   const scaleX = targetWidth / bbox.width;
   const scaleY = targetHeight / bbox.height;
   let scale = Math.min(scaleX, scaleY);
 
-  // Ensure minimum size
   const scaledWidth = bbox.width * scale;
   const scaledHeight = bbox.height * scale;
 
@@ -343,7 +384,7 @@ export function scalePolygon(
 }
 
 /**
- * Convert pixel polygon to millimeters based on DPI or manual scale
+ * Convert pixel polygon to millimeters
  */
 export function pixelsToMm(polygon: Polygon, pixelsPerMm: number): Polygon {
   return polygon.map((p) => ({
@@ -372,7 +413,7 @@ export function drawPolygonPreview(
   fillColor: string = 'rgba(0, 255, 0, 0.2)'
 ): void {
   const ctx = canvas.getContext('2d')!;
-  
+
   if (polygon.length < 3) return;
 
   ctx.beginPath();

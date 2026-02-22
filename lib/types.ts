@@ -24,6 +24,7 @@ export interface ProcessingConfig {
   mode: ProcessingMode;
   threshold: number;
   simplificationTolerance: number;
+  invertThreshold: boolean;
 }
 
 export interface PlateConfig {
@@ -48,6 +49,7 @@ export interface AppState {
   processingMode: ProcessingMode;
   threshold: number;
   simplificationTolerance: number;
+  invertThreshold: boolean;
   switchType: SwitchType;
   scale: number;
   bottomThickness: number;

@@ -32,6 +32,7 @@ const initialState: AppState = {
   processingMode: DEFAULTS.processingMode,
   threshold: DEFAULTS.threshold,
   simplificationTolerance: DEFAULTS.simplificationTolerance,
+  invertThreshold: DEFAULTS.invertThreshold,
   switchType: DEFAULTS.switchType,
   scale: DEFAULTS.scale,
   bottomThickness: DEFAULTS.bottomThickness,
@@ -86,11 +87,12 @@ export default function Home() {
       const { polygon: contour, usedFallback } = extractContour(
         canvas,
         state.processingMode,
-        state.threshold
+        state.threshold,
+        state.invertThreshold
       );
 
       if (!contour || contour.length < 3) {
-        throw new Error('Could not extract shape from image. Try adjusting the threshold.');
+        throw new Error('Could not extract shape from image. Try adjusting the threshold or enabling Invert.');
       }
 
       setUsingFallback(usedFallback);
@@ -113,14 +115,14 @@ export default function Home() {
         error: err instanceof Error ? err.message : 'Failed to process image',
       });
     }
-  }, [state.imageFile, state.processingMode, state.threshold, state.simplificationTolerance, updateState]);
+  }, [state.imageFile, state.processingMode, state.threshold, state.invertThreshold, state.simplificationTolerance, updateState]);
 
   // Reprocess when settings change
   useEffect(() => {
     if (state.imageFile) {
       processImage();
     }
-  }, [state.imageFile, state.processingMode, state.threshold, state.simplificationTolerance, processImage]);
+  }, [state.imageFile, state.processingMode, state.threshold, state.invertThreshold, state.simplificationTolerance, processImage]);
 
   // Generate plates when polygon or settings change
   useEffect(() => {
@@ -223,9 +225,11 @@ export default function Home() {
                     mode={state.processingMode}
                     threshold={state.threshold}
                     simplificationTolerance={state.simplificationTolerance}
+                    invertThreshold={state.invertThreshold}
                     onModeChange={(mode) => updateState({ processingMode: mode })}
                     onThresholdChange={(value) => updateState({ threshold: value })}
                     onSimplificationChange={(value) => updateState({ simplificationTolerance: value })}
+                    onInvertChange={(value) => updateState({ invertThreshold: value })}
                     disabled={state.isProcessing}
                   />
                 </Box>

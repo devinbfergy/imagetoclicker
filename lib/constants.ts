@@ -35,6 +35,7 @@ export const DEFAULTS = {
   processingMode: 'threshold' as const,
   threshold: 128,
   simplificationTolerance: 2.0,
+  invertThreshold: false,
   switchType: 'mx' as const,
   scale: 1.0,
   bottomThickness: 3.0,

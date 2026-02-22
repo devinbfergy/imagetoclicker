@@ -157,20 +157,22 @@ export function imageToCanvas(
 function extractContourOpenCV(
   canvas: HTMLCanvasElement,
   mode: ProcessingMode,
-  threshold: number
+  threshold: number,
+  invert: boolean
 ): Polygon | null {
   if (!cv) return null;
 
   if (mode === 'alpha') {
     return extractContourAlphaOpenCV(canvas);
   } else {
-    return extractContourThresholdOpenCV(canvas, threshold);
+    return extractContourThresholdOpenCV(canvas, threshold, invert);
   }
 }
 
 function extractContourThresholdOpenCV(
   canvas: HTMLCanvasElement,
-  threshold: number
+  threshold: number,
+  invert: boolean
 ): Polygon | null {
   const src = cv.imread(canvas);
   const gray = new cv.Mat();
@@ -180,7 +182,11 @@ function extractContourThresholdOpenCV(
 
   try {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.threshold(gray, binary, threshold, 255, cv.THRESH_BINARY);
+
+    // Use appropriate threshold type based on invert flag
+    const threshType = invert ? cv.THRESH_BINARY : cv.THRESH_BINARY_INV;
+    cv.threshold(gray, binary, threshold, 255, threshType);
+
     cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
     if (contours.size() === 0) return null;
@@ -304,16 +310,17 @@ function simplifyPolygonOpenCV(polygon: Polygon, tolerance: number): Polygon {
 export function extractContour(
   canvas: HTMLCanvasElement,
   mode: ProcessingMode,
-  threshold: number = 128
+  threshold: number = 128,
+  invert?: boolean
 ): { polygon: Polygon | null; usedFallback: boolean } {
   // Try OpenCV first if available
   if (isOpenCVReady()) {
-    const polygon = extractContourOpenCV(canvas, mode, threshold);
+    const polygon = extractContourOpenCV(canvas, mode, threshold, invert ?? false);
     return { polygon, usedFallback: false };
   }
 
-  // Fall back to lightweight extraction
-  const polygon = extractContourLightweight(canvas, mode, threshold);
+  // Fall back to lightweight extraction (supports auto-detection when invert is undefined)
+  const polygon = extractContourLightweight(canvas, mode, threshold, invert);
   return { polygon, usedFallback: true };
 }
 

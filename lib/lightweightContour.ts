@@ -7,12 +7,61 @@
 import { Point, Polygon } from './types';
 
 /**
+ * Analyze image to determine if subject is lighter or darker than background.
+ * Checks edge pixels vs center pixels to make the determination.
+ */
+function analyzeImageBrightness(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number
+): { shouldInvert: boolean; edgeAvg: number; centerAvg: number } {
+  let edgeSum = 0;
+  let edgeCount = 0;
+  let centerSum = 0;
+  let centerCount = 0;
+
+  const edgeMargin = Math.max(2, Math.floor(Math.min(width, height) * 0.05));
+  const centerMarginX = Math.floor(width * 0.3);
+  const centerMarginY = Math.floor(height * 0.3);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+
+      const isEdge = x < edgeMargin || x >= width - edgeMargin ||
+                     y < edgeMargin || y >= height - edgeMargin;
+      const isCenter = x >= centerMarginX && x < width - centerMarginX &&
+                       y >= centerMarginY && y < height - centerMarginY;
+
+      if (isEdge) {
+        edgeSum += luminance;
+        edgeCount++;
+      } else if (isCenter) {
+        centerSum += luminance;
+        centerCount++;
+      }
+    }
+  }
+
+  const edgeAvg = edgeCount > 0 ? edgeSum / edgeCount : 128;
+  const centerAvg = centerCount > 0 ? centerSum / centerCount : 128;
+
+  // If edges are brighter than center, subject is likely dark (normal case)
+  // If center is brighter than edges, subject is likely bright (needs invert)
+  const shouldInvert = centerAvg > edgeAvg + 20;
+
+  return { shouldInvert, edgeAvg, centerAvg };
+}
+
+/**
  * Extract contour using alpha channel with marching squares
  */
 export function extractContourLightweight(
   canvas: HTMLCanvasElement,
   mode: 'alpha' | 'threshold',
-  threshold: number = 128
+  threshold: number = 128,
+  invertOverride?: boolean
 ): Polygon | null {
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
@@ -20,9 +69,16 @@ export function extractContourLightweight(
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const { width, height, data } = imageData;
 
+  // Auto-detect inversion if not explicitly set
+  let shouldInvert = invertOverride ?? false;
+  if (mode === 'threshold' && invertOverride === undefined) {
+    const analysis = analyzeImageBrightness(data, width, height);
+    shouldInvert = analysis.shouldInvert;
+  }
+
   // Create binary mask
   const mask = new Uint8Array(width * height);
-  
+
   for (let i = 0; i < width * height; i++) {
     const pixelIndex = i * 4;
     if (mode === 'alpha') {
@@ -34,14 +90,21 @@ export function extractContourLightweight(
       const g = data[pixelIndex + 1];
       const b = data[pixelIndex + 2];
       const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-      mask[i] = luminance < threshold ? 1 : 0;
+
+      if (shouldInvert) {
+        // Subject is brighter than background
+        mask[i] = luminance > threshold ? 1 : 0;
+      } else {
+        // Subject is darker than background (original behavior)
+        mask[i] = luminance < threshold ? 1 : 0;
+      }
     }
   }
 
   // Find starting point (first non-zero pixel)
   let startX = -1;
   let startY = -1;
-  
+
   outer: for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       if (mask[y * width + x] === 1) {
@@ -56,7 +119,7 @@ export function extractContourLightweight(
 
   // Moore-Neighbor tracing algorithm for contour extraction
   const contour = mooreNeighborTrace(mask, width, height, startX, startY);
-  
+
   if (contour.length < 3) return null;
 
   return contour;

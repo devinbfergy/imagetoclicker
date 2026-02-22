@@ -5,6 +5,7 @@ import {
   Radio,
   RadioGroup,
   Slider,
+  Switch,
   Typography,
 } from '@mui/material';
 import { ProcessingMode } from '@/lib/types';
@@ -13,9 +14,11 @@ interface ProcessingOptionsProps {
   mode: ProcessingMode;
   threshold: number;
   simplificationTolerance: number;
+  invertThreshold: boolean;
   onModeChange: (mode: ProcessingMode) => void;
   onThresholdChange: (value: number) => void;
   onSimplificationChange: (value: number) => void;
+  onInvertChange: (value: boolean) => void;
   disabled?: boolean;
 }
 
@@ -23,9 +26,11 @@ export default function ProcessingOptions({
   mode,
   threshold,
   simplificationTolerance,
+  invertThreshold,
   onModeChange,
   onThresholdChange,
   onSimplificationChange,
+  onInvertChange,
   disabled = false,
 }: ProcessingOptionsProps) {
   return (
@@ -75,6 +80,25 @@ export default function ProcessingOptions({
             step={1}
             disabled={disabled}
             size="small"
+          />
+          <FormControlLabel
+            control={
+              <Switch
+                checked={invertThreshold}
+                onChange={(e) => onInvertChange(e.target.checked)}
+                disabled={disabled}
+                size="small"
+              />
+            }
+            label={
+              <Box>
+                <Typography variant="body2">Invert</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Use for bright logos on dark backgrounds
+                </Typography>
+              </Box>
+            }
+            sx={{ mt: 1 }}
           />
         </Box>
       )}
